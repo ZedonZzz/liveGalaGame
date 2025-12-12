@@ -1,27 +1,126 @@
-// 跨标签页状态同步
-const CHANNEL_NAME = 'livegalagame-sync'
+// 跨窗口状态同步 - WebSocket 版本
+// 支持 OBS 浏览器源与外部浏览器通信
 
-let channel = null
+const WS_URL = 'ws://localhost:9527'
+const RECONNECT_INTERVAL = 3000
 
-export function initSyncChannel() {
-  if (typeof BroadcastChannel !== 'undefined') {
-    channel = new BroadcastChannel(CHANNEL_NAME)
-  }
-  return channel
+let ws = null
+let messageHandler = null
+let reconnectTimer = null
+
+// 连接状态
+export const connectionState = {
+  connected: false,
+  reconnecting: false
 }
 
+// 初始化 WebSocket 连接
+export function initSyncChannel() {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    return ws
+  }
+
+  try {
+    ws = new WebSocket(WS_URL)
+
+    ws.onopen = () => {
+      console.log('[Sync] WebSocket 已连接')
+      connectionState.connected = true
+      connectionState.reconnecting = false
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer)
+        reconnectTimer = null
+      }
+    }
+
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        if (messageHandler) {
+          messageHandler({ data })
+        }
+      } catch (e) {
+        console.error('[Sync] 消息解析失败:', e)
+      }
+    }
+
+    ws.onclose = () => {
+      console.log('[Sync] WebSocket 已断开，尝试重连...')
+      connectionState.connected = false
+      scheduleReconnect()
+    }
+
+    ws.onerror = (err) => {
+      console.error('[Sync] WebSocket 错误')
+      connectionState.connected = false
+    }
+  } catch (e) {
+    console.error('[Sync] WebSocket 初始化失败:', e)
+    scheduleReconnect()
+  }
+
+  return ws
+}
+
+// 定时重连
+function scheduleReconnect() {
+  if (reconnectTimer) return
+
+  connectionState.reconnecting = true
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null
+    initSyncChannel()
+  }, RECONNECT_INTERVAL)
+}
+
+// 获取同步通道（兼容旧接口）
 export function getSyncChannel() {
-  if (!channel) {
+  if (!ws) {
     initSyncChannel()
   }
-  return channel
+
+  // 返回兼容 BroadcastChannel 接口的对象
+  return {
+    postMessage: (data) => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(data))
+      }
+    },
+    set onmessage(handler) {
+      messageHandler = handler
+    },
+    get onmessage() {
+      return messageHandler
+    }
+  }
 }
 
 // 发送同步消息
 export function broadcastSync(type, payload) {
-  const ch = getSyncChannel()
-  if (ch) {
-    ch.postMessage({ type, payload, timestamp: Date.now() })
+  // 确保连接已初始化
+  if (!ws) {
+    initSyncChannel()
+  }
+
+  const message = JSON.stringify({ type, payload, timestamp: Date.now() })
+
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(message)
+  } else {
+    // 连接未就绪时，等待连接后发送（最多重试 30 次，共 3 秒）
+    let retries = 0
+    const maxRetries = 30
+    const checkAndSend = () => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(message)
+      } else if (retries < maxRetries) {
+        retries++
+        setTimeout(checkAndSend, 100)
+      } else {
+        console.warn('[Sync] 消息发送失败：WebSocket 连接超时')
+      }
+    }
+    setTimeout(checkAndSend, 100)
   }
 }
 
