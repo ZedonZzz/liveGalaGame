@@ -34,3 +34,10 @@ coverage
 
 # Vitest
 __screenshots__/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
